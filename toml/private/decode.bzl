@@ -22,6 +22,9 @@ _MAX_ITERATIONS_MULTIPLIER = 2
 # that may have been automatically replaced by the Starlark loader.
 _REPLACEMENT_CHAR = json.decode('"\\uFFFD"')
 
+# The UTF-8 BOM (U+FEFF). Allowed but not recommended at start of TOML files.
+_UTF8_BOM = json.decode('"\\uFEFF"')
+
 # --- Status & Error Handling ---
 
 def _errors():
@@ -1485,6 +1488,11 @@ def decode(data, default = None, datetime_formatter = None, max_depth = 128, exp
         The decoded Starlark structure, or the default value on failure.
     """
     data = data.replace("\r\n", "\n")
+
+    # Strip UTF-8 BOM if present.
+    if data.startswith(_UTF8_BOM):
+        data = data[len(_UTF8_BOM):]
+
     state = _parser(data, default, datetime_formatter, max_depth, expand_values)
 
     # Initial safety check
