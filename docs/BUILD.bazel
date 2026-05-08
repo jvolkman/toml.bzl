@@ -1,18 +1,33 @@
 """Build rules for documentation."""
 
-load("@aspect_bazel_lib//lib:docs.bzl", "stardoc_with_diff_test", "update_docs")
+load("@bazel_lib//lib:diff_test.bzl", "diff_test")
+load("@bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@io_bazel_stardoc//stardoc:stardoc.bzl", "stardoc")
+load("@rules_java//java:java_binary.bzl", "java_binary")
 
-# buildifier: disable=native-java-binary
 java_binary(
     name = "renderer",
     main_class = "com/google/devtools/build/stardoc/renderer/RendererMain",
     runtime_deps = ["@stardoc-prebuilt//jar"],
 )
 
-stardoc_with_diff_test(
-    name = "toml",
-    bzl_library_target = "@toml.bzl//:toml",
+stardoc(
+    name = "toml_doc",
+    out = "toml_generated.md",
+    input = "@toml.bzl//:toml.bzl",
     renderer = ":renderer",
+    deps = ["@toml.bzl//:toml"],
 )
 
-update_docs(name = "update")
+diff_test(
+    name = "toml_test",
+    file1 = "toml.md",
+    file2 = "toml_generated.md",
+)
+
+write_source_files(
+    name = "update",
+    files = {
+        "toml.md": "toml_generated.md",
+    },
+)
