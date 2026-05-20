@@ -684,7 +684,8 @@ def _parse_key_value(state, target):
     keys = _parse_dotted_key(state)
     if state["error"] != None or not keys:
         return
-    _skip_ws(state)
+
+    # _skip_ws elided: _parse_dotted_key already skipped after last key
     _expect(state, "=")
     _skip_ws(state)
     value = _parse_value(state)
@@ -1266,7 +1267,8 @@ def _parse_complex_iterative(state):
                     stack.pop()
                     continue
                 ks = _parse_dotted_key(state)
-                _skip_ws(state)
+
+                # _skip_ws elided: _parse_dotted_key already skipped after last key
                 _expect(state, "=")
                 _skip_ws(state)
                 pos = state["pos"]
@@ -1398,8 +1400,10 @@ def _expand_to_toml_test(raw, size_hint):
     return root
 
 def _parse_value(state):
-    """Delegates parsing to scalars, strings, or complex structures."""
-    _skip_ws(state)
+    """Delegates parsing to scalars, strings, or complex structures.
+
+    Callers must skip whitespace before calling this function.
+    """
     pos = state["pos"]
     if pos >= state["len"]:
         _fail(state, "Value expected at EOF")
