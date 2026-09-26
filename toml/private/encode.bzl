@@ -4,6 +4,9 @@
 # Starlark implementation of a TOML encoder.
 # Note: Recursion is not supported in Starlark, so we use iterative stack-based approaches.
 
+# Kept in ASCII order: lstrip() sorts its charset on every call, so pre-sorted input is cheaper.
+_BARE_KEY_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+
 def _escape_string(s):
     res = json.encode(s)
 
@@ -15,13 +18,9 @@ def _escape_string(s):
 def _escape_key(k):
     # Simple keys don't need quotes if they match [A-Za-z0-9_-]+
     # Otherwise quote.
-    if not k:
-        return '""'
-    for i in range(len(k)):
-        c = k[i]
-        if not (c.isalnum() or c == "-" or c == "_"):
-            return _escape_string(k)
-    return k
+    if k and not k.lstrip(_BARE_KEY_CHARS):
+        return k
+    return _escape_string(k)
 
 def _pad_num(n, width):
     """Pads an integer with leading zeros."""
@@ -99,6 +98,7 @@ def _encode_scalar(v):
             return str(v.value)
     fail("Unsupported scalar type: %s" % t)
 
+# buildifier: disable=list-append
 def _encode_inline_array(arr, max_tables, current_depth = 0):
     # Iterative encoding for arrays/inline values.
     # Uses a stack to flatten the structure into tokens.
@@ -125,35 +125,35 @@ def _encode_inline_array(arr, max_tables, current_depth = 0):
             fail("Max nesting depth exceeded in inline structure")
 
         if t == "tuple" and item[0] == "OUT":
-            tokens.append(item[1])
+            tokens += [item[1]]
             continue
 
         if t == "list":
             # Array -> [ val, val ]
-            work.append((("OUT", "]"), depth))
+            work += [(("OUT", "]"), depth)]
             for i in range(len(item) - 1, -1, -1):
-                work.append((item[i], depth + 1))
+                work += [(item[i], depth + 1)]
                 if i > 0:
-                    work.append((("OUT", ", "), depth))
-            work.append((("OUT", "["), depth))
+                    work += [(("OUT", ", "), depth)]
+            work += [(("OUT", "["), depth)]
 
         elif t == "dict":
             # Inline Table -> { key = val, ... }
-            work.append((("OUT", "}"), depth))
+            work += [(("OUT", "}"), depth)]
             keys = sorted(item.keys())
             for i in range(len(keys) - 1, -1, -1):
                 k = keys[i]
-                work.append((item[k], depth + 1))
-                work.append((("OUT", " = "), depth))
+                work += [(item[k], depth + 1)]
+                work += [(("OUT", " = "), depth)]
 
                 # We assume keys in inline tables should also be escaped if needed
-                work.append((("OUT", _escape_key(k)), depth))
+                work += [(("OUT", _escape_key(k)), depth)]
                 if i > 0:
-                    work.append((("OUT", ", "), depth))
-            work.append((("OUT", "{"), depth))
+                    work += [(("OUT", ", "), depth)]
+            work += [(("OUT", "{"), depth)]
 
         elif t == "string" or t == "int" or t == "bool" or t == "float" or t == "struct":
-            tokens.append(_encode_scalar(item))
+            tokens += [_encode_scalar(item)]
         else:
             fail("Unable to encode type in inline structure: %s" % t)
 
@@ -163,13 +163,14 @@ def _encode_inline_array(arr, max_tables, current_depth = 0):
     return "".join(tokens)
 
 def _is_aot(v):
-    if not v:
+    if not v or type(v[0]) != "dict":
         return False
     for x in v:
         if type(x) != "dict":
             return False
     return True
 
+# buildifier: disable=list-append
 def encode(data, *, max_tables = 1000000):
     """Encodes a Starlark dictionary into a TOML string.
 
@@ -209,22 +210,22 @@ def encode(data, *, max_tables = 1000000):
             t = type(v)
 
             if t == "dict":
-                tables.append((k, v))
+                tables += [(k, v)]
             elif t == "list":
                 if _is_aot(v):
-                    arrays_of_tables.append((k, v))
+                    arrays_of_tables += [(k, v)]
                 else:
-                    simple_fields.append((k, v))
+                    simple_fields += [(k, v)]
             else:
-                simple_fields.append((k, v))
+                simple_fields += [(k, v)]
 
         # 1. Write Header
         if path:
             header = ".".join([_escape_key(p) for p in path])
             if is_aot:
-                output.append("\n[[%s]]" % header)
+                output += ["\n[[%s]]" % header]
             else:
-                output.append("\n[%s]" % header)
+                output += ["\n[%s]" % header]
 
         # 2. Write Simple Keys
         for k, v in simple_fields:
@@ -232,13 +233,13 @@ def encode(data, *, max_tables = 1000000):
                 val_str = _encode_inline_array(v, max_tables, depth + 1)
             else:
                 val_str = _encode_scalar(v)
-            output.append("%s = %s" % (_escape_key(k), val_str))
+            output += ["%s = %s" % (_escape_key(k), val_str)]
 
         # 3. Queue Tables
         for i in range(len(tables) - 1, -1, -1):
             k, v = tables[i]
             new_path = path + [k]
-            stack.append((new_path, v, False, depth + 1))
+            stack += [(new_path, v, False, depth + 1)]
 
         # 4. Handle Array of Tables
         for i in range(len(arrays_of_tables) - 1, -1, -1):
@@ -246,7 +247,7 @@ def encode(data, *, max_tables = 1000000):
             for j in range(len(v_list) - 1, -1, -1):
                 item = v_list[j]
                 new_path = path + [k]
-                stack.append((new_path, item, True, depth + 1))
+                stack += [(new_path, item, True, depth + 1)]
 
     if stack:
         fail("Max tables exceeded")
