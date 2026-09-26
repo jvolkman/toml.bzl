@@ -54,3 +54,5 @@ repos:
     rev: v1.35.3
     hooks:
       - id: typos
+        # Benchmark data files are verbatim third-party documents (lockfiles, manifests).
+        exclude: ^toml/tests/benchmarks/.*_data\.bzl$
