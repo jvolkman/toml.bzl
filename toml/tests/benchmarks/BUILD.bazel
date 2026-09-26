@@ -4,6 +4,7 @@ load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load("//toml/tests/benchmarks:benchmark_test.bzl", "benchmark_test")
 load(":cargo_lock_prof.bzl", "benchmark_runner")
 load(":channel_rust_prof.bzl", "channel_rust_benchmark_runner")
+load(":uv_lock_prof.bzl", "uv_lock_benchmark_runner")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -30,4 +31,8 @@ benchmark_runner(
 
 channel_rust_benchmark_runner(
     name = "channel_rust_benchmark_prof",
+)
+
+uv_lock_benchmark_runner(
+    name = "uv_lock_benchmark_prof",
 )
