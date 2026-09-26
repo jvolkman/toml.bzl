@@ -9,9 +9,13 @@ Based on profiling within this codebase and others, the following patterns are s
 Operators are built-in to the Starlark interpreter and avoid the overhead of method lookup and dispatch.
 
 - **List Append**: Use `list += [item]` instead of `list.append(item)`.
-  - _Result_: `+= [item]` is approximately **2x faster** than `.append()`.
+  - _Result_: `+= [item]` is approximately **3x faster** than `.append()` (Bazel 8.5). `x.method(...)` allocates a
+    new bound `BuiltinFunction` and calls it reflectively; `list += list` is special-cased in the interpreter.
+  - Buildifier's `list-append` lint prefers `.append()`; suppress it with `# buildifier: disable=list-append`
+    above the `def`.
 - **List Copy**: Use `list_copy = original[:]` instead of `list_copy = list(original)`.
   - _Result_: `[:]` slicing is approximately **2.5x faster** than `list()`.
+- **Dict Lookup**: Prefer `d[k] if k in d else None` over `d.get(k)` in hot paths (same method-call overhead).
 
 ## Core Starlark Constraints
 
@@ -36,6 +40,9 @@ Operators are built-in to the Starlark interpreter and avoid the overhead of met
 
     - Use `s.find()`, `s.rfind()`, `s.startswith()`, `s.endswith()`, `s.isdigit()` whenever possible.
     - These run in Java/C++ native code and are significantly faster than iterating characters in Starlark.
+    - **`lstrip(chars)`/`rstrip(chars)` build a new `CharMatcher.anyOf(chars)` on every call**, which sorts the
+      charset. Keep charset constants in ASCII order (roughly halves the cost), and prefer `isalnum()`/`isdigit()`
+      (static matchers) when they express the check exactly.
 
 2.  **Character Iteration**:
 

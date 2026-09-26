@@ -1,8 +1,13 @@
 """Starlark TOML Decoder implementation."""
 
 # --- Constants for Tokenization ---
-_BARE_KEY_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-_VALID_ASCII_CHARS = "\n\t !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+# NOTE: Character sets passed to lstrip()/rstrip() are kept in ASCII order.
+# Bazel builds a CharMatcher.anyOf(chars) on every call, which sorts the
+# characters; pre-sorted input makes that per-call sort significantly cheaper.
+_BARE_KEY_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+_BARE_KEY_DOT_CHARS = "-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+_HEX_CHARS = "0123456789ABCDEFabcdef"
+_VALID_ASCII_CHARS = "\t\n !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 _TOML_ESCAPES = {
     "b": "\b",
     "t": "\t",
@@ -78,22 +83,36 @@ def _skip_ws(state, skip_nl = False):
     data = state["data"]
     skip_chars = " \t\n" if skip_nl else " \t"
 
-    # HYPER-FAST PATH: Skip a single whitespace char
+    # HYPER-FAST PATH: Skip 1 or 2 whitespace chars (covers single space/newline, blank lines, 1-space indent)
     char = data[pos]
     if char in skip_chars:
         pos += 1
         if pos < length:
             nc = data[pos]
+            if nc in skip_chars:
+                pos += 1
+                if pos >= length:
+                    state["pos"] = pos
+                    return
+                nc = data[pos]
             if nc not in skip_chars and nc != "#":
                 state["pos"] = pos
                 return
+            if nc != "#":
+                # Fast path for short multi-char whitespace (>2 chars)
+                chunk = data[pos:pos + 64]
+                stripped = chunk.lstrip(skip_chars)
+                if stripped and stripped[0] != "#":
+                    state["pos"] = pos + len(chunk) - len(stripped)
+                    return
+                pos += len(chunk) - len(stripped)
         else:
             state["pos"] = pos
             return
     elif char != "#":
         return
 
-    # SLOW PATH: Multiple spaces, tabs, or comments
+    # SLOW PATH: Long whitespace (>64 chars) or comments
     for _ in range(length):
         if pos >= length:
             break
@@ -112,7 +131,7 @@ def _skip_ws(state, skip_nl = False):
 
             # Sync pos before validation as it might fail
             state["pos"] = pos
-            if not _validate_text(state, comment_text, "comment", allow_nl = False):
+            if not _validate_text(state, comment_text, "comment", False):
                 return
             pos = comment_end
             continue
@@ -195,7 +214,7 @@ def _validate_text(state, text, context, allow_nl = False):
 
 def _is_hex(hex_str):
     """Returns True if the string is a valid hexadecimal sequence."""
-    return not hex_str.lstrip("0123456789abcdefABCDEF")
+    return not hex_str.lstrip(_HEX_CHARS)
 
 def _to_hex(val, width):
     """Formats an integer as a zero-padded hexadecimal string."""
@@ -285,18 +304,20 @@ def _parse_basic_string(state):
         _fail(state, "Unterminated string")
         return ""
 
-    # Bounded search for first escape
-    escape_idx = data.find("\\", pos, quote_idx)
-
-    # FAST PATH: No escapes in the string
-    if escape_idx == -1:
-        chunk = data[pos:quote_idx]
-        if not _validate_text(state, chunk, "string", allow_nl = False):
+    # FAST PATH: Slice first and check for escapes using built-in 'in' operator
+    chunk = data[pos:quote_idx]
+    if "\\" not in chunk:
+        if state["is_safe"]:
+            if "\n" in chunk:
+                _fail(state, "Control char in string")
+                return ""
+        elif not _validate_text(state, chunk, "string", False):
             return ""
         state["pos"] = quote_idx + 1
         return chunk
 
     # SLOW PATH: Has escapes, process in chunks
+    escape_idx = data.find("\\", pos, quote_idx)
     chars = []
     cached_quote_idx = quote_idx
     cached_backslash_idx = escape_idx
@@ -318,7 +339,7 @@ def _parse_basic_string(state):
 
         if next_idx > pos:
             chunk = data[pos:next_idx]
-            if not _validate_text(state, chunk, "string", allow_nl = False):
+            if not _validate_text(state, chunk, "string", False):
                 return ""
             chars += [chunk]
             pos = next_idx
@@ -375,7 +396,7 @@ def _parse_literal_string(state):
         _fail(state, "Unterminated literal string")
         return ""
     content = data[pos:idx]
-    if not _validate_text(state, content, "literal string", allow_nl = False):
+    if not _validate_text(state, content, "literal string", False):
         return ""
     state["pos"] = idx + 1
     return content
@@ -415,7 +436,7 @@ def _parse_multiline_basic_string(state):
 
         if next_idx > pos:
             chunk = data[pos:next_idx]
-            if not _validate_text(state, chunk, "multiline string", allow_nl = True):
+            if not _validate_text(state, chunk, "multiline string", True):
                 return ""
             chars += [chunk]
 
@@ -520,7 +541,7 @@ def _parse_multiline_literal_string(state):
         else:
             break
     content = data[pos:idx + ex]
-    if not _validate_text(state, content, "multiline literal", allow_nl = True):
+    if not _validate_text(state, content, "multiline literal", True):
         return ""
 
     state["pos"] = idx + 3 + ex
@@ -531,12 +552,12 @@ def _parse_string(state):
     p = state["pos"]
     d = state["data"]
     if d[p] == '"':
-        if p + 2 < state["len"] and d[p + 1:p + 3] == '""':
+        if p + 2 < state["len"] and d[p + 1] == '"' and d[p + 2] == '"':
             state["pos"] += 1
             return _parse_multiline_basic_string(state)
         return _parse_basic_string(state)
     if d[p] == "'":
-        if p + 2 < state["len"] and d[p + 1:p + 3] == "''":
+        if p + 2 < state["len"] and d[p + 1] == "'" and d[p + 2] == "'":
             state["pos"] += 1
             return _parse_multiline_literal_string(state)
         return _parse_literal_string(state)
@@ -565,8 +586,20 @@ def _parse_key(state):
     # Hand-parse bare keys: [A-Za-z0-9_-]+
     start = pos
 
-    # Use windowed lstrip to avoid character loop overhead
-    # Bounded range to avoid allocation
+    # Fast path: 99.9% of bare keys are < 64 chars, avoid range(length) loop
+    window = data[pos:pos + 64]
+    stripped = window.lstrip(_BARE_KEY_CHARS)
+    if stripped:
+        if stripped == window:
+            _fail(state, "Invalid key format")
+            return ""
+        end = pos + len(window) - len(stripped)
+        state["pos"] = end
+        return data[start:end]
+
+    pos += len(window)
+
+    # Slow path for bare keys >= 64 chars
     for _ in range(length):
         if pos >= length:
             break
@@ -588,31 +621,64 @@ def _parse_key(state):
 # buildifier: disable=list-append
 def _parse_dotted_key(state):
     """Parses a dotted key into a list of components."""
+    pos = state["pos"]
+    data = state["data"]
+    length = state["len"]
+
+    # Fastest path: a simple (undotted) bare key followed by " = ", e.g. `name = ...`.
+    # isalnum() uses a static matcher (exactly [A-Za-z0-9] for Bazel's Latin-1 strings), so it is
+    # much cheaper than lstrip() with a charset, which builds a new CharMatcher on every call.
+    eq = data.find(" = ", pos, pos + 64)
+    if eq > pos:
+        raw = data[pos:eq]
+        if raw.isalnum() or ("\n" not in raw and not raw.lstrip(_BARE_KEY_CHARS)):
+            state["pos"] = eq + 1
+            return [raw]
+
+    # Fast path for standard bare / dotted-bare keys (< 64 chars, no quotes or spaces around dots)
+    if pos < length:
+        window = data[pos:pos + 64]
+        stripped = window.lstrip(_BARE_KEY_DOT_CHARS)
+        if stripped and stripped != window:
+            next_c = stripped[0]
+            if next_c == "=" or next_c == "]" or (next_c == " " and stripped[1:2] == "="):
+                end = pos + len(window) - len(stripped)
+                raw = data[pos:end]
+                if "." not in raw:
+                    state["pos"] = end + (1 if next_c == " " else 0)
+                    return [raw]
+                if raw[0] != "." and raw[-1] != "." and ".." not in raw:
+                    state["pos"] = end + (1 if next_c == " " else 0)
+                    return raw.split(".")
+
     keys = []
-    for _ in range(state["len"]):
+    for _ in range(length):
         _skip_ws(state)
         k = _parse_key(state)
         if state["error"] != None:
             return keys
         keys += [k]
         _skip_ws(state)
-        if state["pos"] < state["len"] and state["data"][state["pos"]] == ".":
+        if state["pos"] < length and data[state["pos"]] == ".":
             state["pos"] += 1
             continue
         break
     return keys
 
+# buildifier: disable=list-append
 def _get_or_create_table(state, keys, is_array):
     """Navigates to or creates the table structure specified by the dotted keys."""
     current = state["root"]
-    path = []
+    path_types = state["path_types"]
+    explicit_paths = state["explicit_paths"]
+    header_paths = state["header_paths"]
+    full_path_tuple = tuple(keys)
     for i in range(len(keys) - 1):
         key = keys[i]
-        path.append(key)
-        path_tuple = tuple(path)
+        path_tuple = full_path_tuple[:i + 1]
         if key in current:
             existing = current[key]
-            existing_type = state["path_types"].get(path_tuple)
+            existing_type = path_types[path_tuple] if path_tuple in path_types else None
             if existing_type != "table" and existing_type != "aot":
                 _fail(state, "Traversal conflict with %s" % key)
                 return {}
@@ -624,52 +690,57 @@ def _get_or_create_table(state, keys, is_array):
             new_tab = {}
             current[key] = new_tab
             current = new_tab
-            state["path_types"][path_tuple] = "table"
+            path_types[path_tuple] = "table"
     last_key = keys[-1]
-    path.append(last_key)
-    path_tuple = tuple(path)
+    path_tuple = full_path_tuple
     if is_array:
-        existing_type = state["path_types"].get(path_tuple)
+        existing_type = path_types[path_tuple] if path_tuple in path_types else None
         if existing_type and existing_type != "aot":
             _fail(state, "AOT conflict on %s" % last_key)
             return {}
         if last_key in current:
-            current[last_key].append({})
-            state["explicit_paths"][path_tuple] = True
-            state["header_paths"][path_tuple] = True
-            return current[last_key][-1]
+            if existing_type != "aot":
+                _fail(state, "AOT conflict on %s" % last_key)
+                return {}
+            new_elem = {}
+            current[last_key] += [new_elem]
+            explicit_paths[path_tuple] = True
+            header_paths[path_tuple] = True
+            return new_elem
         else:
-            current[last_key] = [{}]
-            state["path_types"][path_tuple] = "aot"
-            state["explicit_paths"][path_tuple] = True
-            state["header_paths"][path_tuple] = True
-            return current[last_key][0]
+            new_elem = {}
+            current[last_key] = [new_elem]
+            path_types[path_tuple] = "aot"
+            explicit_paths[path_tuple] = True
+            header_paths[path_tuple] = True
+            return new_elem
     elif last_key in current:
-        if state["explicit_paths"].get(path_tuple):
+        if path_tuple in explicit_paths:
             _fail(state, "Redefinition of %s" % last_key)
             return {}
-        existing_type = state["path_types"].get(path_tuple)
+        existing_type = path_types[path_tuple] if path_tuple in path_types else None
         if existing_type != "table":
             _fail(state, "Table conflict on %s" % last_key)
             return {}
-        state["explicit_paths"][path_tuple] = True
-        state["header_paths"][path_tuple] = True
+        explicit_paths[path_tuple] = True
+        header_paths[path_tuple] = True
         return current[last_key]
     else:
         new_tab = {}
         current[last_key] = new_tab
-        state["path_types"][path_tuple] = "table"
-        state["explicit_paths"][path_tuple] = True
-        state["header_paths"][path_tuple] = True
+        path_types[path_tuple] = "table"
+        explicit_paths[path_tuple] = True
+        header_paths[path_tuple] = True
         return new_tab
 
 def _parse_table(state):
     """Parses a table header [foo.bar] or [[foo.bar]]."""
-    _expect(state, "[")
+    pos = state["pos"] + 1  # Caller already verified data[pos] == "["
     is_array_of_tables = False
-    if state["pos"] < state["len"] and state["data"][state["pos"]] == "[":
+    if pos < state["len"] and state["data"][pos] == "[":
         is_array_of_tables = True
-        state["pos"] += 1
+        pos += 1
+    state["pos"] = pos
     keys = _parse_dotted_key(state)
     _expect(state, "]")
     if is_array_of_tables:
@@ -685,40 +756,53 @@ def _parse_key_value(state, target):
     if state["error"] != None or not keys:
         return
 
-    # _skip_ws elided: _parse_dotted_key already skipped after last key
-    _expect(state, "=")
-    _skip_ws(state)
+    # _skip_ws elided: _parse_dotted_key already skipped after last key.
+    # Inlined _expect(state, "=") and _skip_ws(state) for the common "key = value" layout.
+    data = state["data"]
+    length = state["len"]
+    pos = state["pos"]
+    if pos >= length or data[pos] != "=":
+        _fail(state, "Expected '=' at %d" % pos)
+        return
+    pos += 1
+    if pos < length and data[pos] == " ":
+        pos += 1
+    state["pos"] = pos
+    if pos < length and data[pos] in " \t":
+        _skip_ws(state)
     value = _parse_value(state)
     if state["error"] != None:
         return
     current = target
-    base_path = state["current_path"]
-    for i in range(len(keys) - 1):
-        k = keys[i]
-        path_tuple = tuple(base_path + keys[:i + 1])
-        if k in current:
-            existing_type = state["path_types"].get(path_tuple)
-            if existing_type != "table":
-                _fail(state, "Key conflict with %s" % k)
-                return
-            if state["header_paths"].get(path_tuple):
-                _fail(state, "Key conflict with table: " + k)
-                return
-            if existing_type == "table":
-                state["explicit_paths"][path_tuple] = True
-            current = current[k]
-        else:
-            new_tab = {}
-            current[k] = new_tab
-            state["path_types"][path_tuple] = "table"
-            state["explicit_paths"][path_tuple] = True
-            current = new_tab
+    if len(keys) > 1:
+        base_path = state["current_path"]
+        path_types = state["path_types"]
+        header_paths = state["header_paths"]
+        explicit_paths = state["explicit_paths"]
+        for i in range(len(keys) - 1):
+            k = keys[i]
+            path_tuple = tuple(base_path + keys[:i + 1])
+            if k in current:
+                existing_type = path_types[path_tuple] if path_tuple in path_types else None
+                if existing_type != "table":
+                    _fail(state, "Key conflict with %s" % k)
+                    return
+                if path_tuple in header_paths:
+                    _fail(state, "Key conflict with table: " + k)
+                    return
+                if existing_type == "table":
+                    explicit_paths[path_tuple] = True
+                current = current[k]
+            else:
+                new_tab = {}
+                current[k] = new_tab
+                path_types[path_tuple] = "table"
+                explicit_paths[path_tuple] = True
+                current = new_tab
 
     last_key = keys[-1]
-    last_path_tuple = tuple(base_path + keys)
     if last_key in current:
         _fail(state, "Redefinition of " + last_key)
-    state["path_types"][last_path_tuple] = "inline" if type(value) == "dict" else ("array" if type(value) == "list" else "scalar")
     current[last_key] = value
 
 def _parse_int_base(state, prefix, valid_chars, base):
@@ -1041,7 +1125,7 @@ def _parse_scalar(state):
         if char == "0" and pos + 1 < length:
             next_char = data[pos + 1]
             if next_char == "x":
-                val = _parse_int_base(state, "0x", "0123456789abcdefABCDEF", 16)
+                val = _parse_int_base(state, "0x", _HEX_CHARS, 16)
                 if val != None:
                     return val
                 _fail(state, "Invalid hex integer")
@@ -1216,13 +1300,18 @@ def _parse_complex_iterative(state):
         fr = stack[-1]
         cont = fr[0]
         mode = fr[1]
-        _skip_ws(state, skip_nl = True)
-        pos = state["pos"]
 
         if pos >= length:
             _fail(state, "EOF in complex")
             return res
         char = data[pos]
+        if char == " " or char == "\n" or char == "\t" or char == "#":
+            _skip_ws(state, True)
+            pos = state["pos"]
+            if pos >= length:
+                _fail(state, "EOF in complex")
+                return res
+            char = data[pos]
 
         if mode <= 2:  # Array modes (_MODE_ARRAY_VAL=1, _MODE_ARRAY_COMMA=2)
             if mode == _MODE_ARRAY_VAL:
@@ -1506,30 +1595,41 @@ def decode(data, default = None, datetime_formatter = None, max_depth = 128, exp
     length = state["len"]
 
     for _ in range(length * _MAX_ITERATIONS_MULTIPLIER):
-        _skip_ws(state, skip_nl = True)
         pos = state["pos"]
         if pos >= length:
             break
 
+        # Only call _skip_ws when there is something to skip (most lines start with a key or '[').
         char = data[pos]
+        if char == " " or char == "\n" or char == "\t" or char == "#":
+            _skip_ws(state, True)
+            pos = state["pos"]
+            if pos >= length:
+                break
+            char = data[pos]
+
         if char == "[":
             _parse_table(state)
-        elif char == "#":
-            _skip_ws(state)  # handles comment until newline
         else:
             _parse_key_value(state, state["current_table"])
 
         if state["error"] != None:
             break
 
-        # Check for trailing junk on the same line
-        _skip_ws(state)
+        # Check for trailing junk on the same line.
+        # Fast path: the statement is immediately followed by a newline.
         pos = state["pos"]
         if pos < length:
-            char = data[pos]
-            if char != "\n" and char != "\r" and char != "#":
-                _fail(state, "Expected newline or EOF")
-                break
+            if data[pos] == "\n":
+                state["pos"] = pos + 1
+                continue
+            _skip_ws(state)
+            pos = state["pos"]
+            if pos < length:
+                char = data[pos]
+                if char != "\n" and char != "\r" and char != "#":
+                    _fail(state, "Expected newline or EOF")
+                    break
 
     if state["error"] != None:
         return default
