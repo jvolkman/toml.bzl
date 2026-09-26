@@ -7,6 +7,7 @@
 _BARE_KEY_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
 _BARE_KEY_DOT_CHARS = "-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
 _HEX_CHARS = "0123456789ABCDEFabcdef"
+_NUM_DATE_CHARS = " +-.0123456789:ETZ_etz"  # Characters that may appear in number/date/time tokens.
 _VALID_ASCII_CHARS = "\t\n !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 _TOML_ESCAPES = {
     "b": "\b",
@@ -1007,22 +1008,13 @@ def _parse_datetime_strict(text):
     rest = rest[1 + processed_len:]
 
     if rest.startswith("."):
-        idx = 1
-
-        # Loop bounded by rest length
-        for _ in range(len(rest)):
-            if idx < len(rest) and rest[idx].isdigit():
-                idx += 1
-            else:
-                break
-
-        frac_s = rest[1:idx]
+        tail = rest[1:]
+        rest = tail.lstrip("0123456789")
+        frac_s = tail[:len(tail) - len(rest)]
         if not frac_s:
             return None
         micros_s = (frac_s + "000000")[:6]
         res["microsecond"] = int(micros_s)
-
-        rest = rest[idx:]
 
     if not rest:
         return res
@@ -1156,19 +1148,28 @@ def _parse_scalar(state):
                     state["pos"] = pos + 4
                     return float("nan")
 
-        # Scan the full token for generic number/date parsing
+        # Scan the full token for generic number/date parsing.
+        # Fast path: a single windowed lstrip covers virtually all tokens.
         start = pos
-        idx = pos
-        for _ in range(length):
-            if idx >= length:
+        window = data[pos:pos + 64]
+        idx = pos + len(window) - len(window.lstrip(_NUM_DATE_CHARS))
+        if idx == pos + 64:
+            # Slow path: token longer than the window.
+            for _ in range(length):
+                if idx >= length:
+                    break
+                c = data[idx]
+                if c in _NUM_DATE_CHARS:
+                    idx += 1
+                    continue
                 break
-            c = data[idx]
-            if c in "0123456789+-.eE_:TtZz ":
-                idx += 1
-                continue
-            break
 
         token_candidate = data[start:idx]
+
+        # Fast path: plain decimal integer (no sign, underscores, or leading zeros).
+        if token_candidate.isdigit() and (token_candidate[0] != "0" or len(token_candidate) == 1):
+            state["pos"] = idx
+            return int(token_candidate)
 
         # 1. Try Datetime strict
         if "-" in token_candidate and len(token_candidate) >= 10:
@@ -1305,6 +1306,14 @@ def _parse_complex_iterative(state):
             _fail(state, "EOF in complex")
             return res
         char = data[pos]
+        if char == " ":
+            # Fast path: a single space separator (e.g. after "{", "," or "=").
+            pos += 1
+            state["pos"] = pos
+            if pos >= length:
+                _fail(state, "EOF in complex")
+                return res
+            char = data[pos]
         if char == " " or char == "\n" or char == "\t" or char == "#":
             _skip_ws(state, True)
             pos = state["pos"]
@@ -1331,7 +1340,7 @@ def _parse_complex_iterative(state):
                     stack += [[new_container, _MODE_ARRAY_VAL if char == "[" else _MODE_TABLE_KEY, None, {}]]
                     fr[1] = _MODE_ARRAY_COMMA
                     continue
-                val = _parse_val_nested(state)
+                val = _parse_string(state) if char == "\"" or char == "'" else _parse_scalar(state)
                 pos = state["pos"]
                 if val != None:
                     cont += [val]
@@ -1340,7 +1349,9 @@ def _parse_complex_iterative(state):
                 _fail(state, "Value expected in array")
             else:  # _MODE_ARRAY_COMMA
                 if char == "]":
-                    fr[1] = _MODE_ARRAY_VAL
+                    pos += 1
+                    state["pos"] = pos
+                    stack.pop()
                     continue
                 if char == ",":
                     pos += 1
@@ -1356,11 +1367,16 @@ def _parse_complex_iterative(state):
                     stack.pop()
                     continue
                 ks = _parse_dotted_key(state)
+                if state["error"] != None:
+                    return res
 
-                # _skip_ws elided: _parse_dotted_key already skipped after last key
-                _expect(state, "=")
-                _skip_ws(state)
+                # _skip_ws elided: _parse_dotted_key already skipped after last key.
+                # Inlined _expect(state, "="); whitespace after it is skipped at the top of the loop.
                 pos = state["pos"]
+                if pos >= length or data[pos] != "=":
+                    _fail(state, "Expected '=' at %d" % pos)
+                    return res
+                pos += 1
                 fr[2] = ks
                 fr[1] = _MODE_TABLE_VAL
             elif mode == _MODE_TABLE_VAL:
@@ -1369,7 +1385,7 @@ def _parse_complex_iterative(state):
 
                 top_k = ks[0]
                 is_dotted = len(ks) > 1
-                was_dotted = explicit_map.get(top_k)
+                was_dotted = explicit_map[top_k] if top_k in explicit_map else None
 
                 if was_dotted != None:
                     if not is_dotted:
@@ -1387,21 +1403,22 @@ def _parse_complex_iterative(state):
                         return res
                     val = [] if char == "[" else {}
                 else:
-                    val = _parse_val_nested(state)
+                    val = _parse_string(state) if char == "\"" or char == "'" else _parse_scalar(state)
                     pos = state["pos"]
                     if state["error"] != None:
                         return res
 
                 # Insert val into dict
                 current = cont
-                for k in ks[:-1]:
-                    # Intermediate keys are implicitly tables
-                    if k not in current:
-                        current[k] = {}
-                    current = current[k]
-                    if type(current) != "dict":
-                        _fail(state, "Key conflict")
-                        return res
+                if is_dotted:
+                    for k in ks[:-1]:
+                        # Intermediate keys are implicitly tables
+                        if k not in current:
+                            current[k] = {}
+                        current = current[k]
+                        if type(current) != "dict":
+                            _fail(state, "Key conflict")
+                            return res
                 last_k = ks[-1]
                 if last_k in current:
                     _fail(state, "Duplicate key %s" % last_k)
@@ -1419,7 +1436,9 @@ def _parse_complex_iterative(state):
 
             else:  # _MODE_TABLE_COMMA
                 if char == "}":
-                    fr[1] = _MODE_TABLE_KEY
+                    pos += 1
+                    state["pos"] = pos
+                    stack.pop()
                     continue
                 if char == ",":
                     pos += 1
@@ -1428,14 +1447,6 @@ def _parse_complex_iterative(state):
                     continue
                 _fail(state, "Inline table comma expected")
     return res
-
-def _parse_val_nested(state):
-    """Parses a value when nested inside a complex iterative structure."""
-    pos = state["pos"]
-    data = state["data"]
-    if data[pos] in ("\"", "'"):
-        return _parse_string(state)
-    return _parse_scalar(state)
 
 def _format_scalar_for_test(v):
     """Formats a scalar value into the `toml-test` JSON compatible format."""
