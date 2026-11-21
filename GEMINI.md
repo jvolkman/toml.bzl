@@ -47,8 +47,8 @@ Operators are built-in to the Starlark interpreter and avoid the overhead of met
 2.  **Character Iteration**:
 
     - Iterating a string (`for char in string:`) is slow in Starlark.
-    - _Alternative_: Tokenize with `split()` or regular expressions (if efficient native regex available, or `bazel-regex` if imported).
-    - _Alternative_: Use `partition()` to jump to delimiters.
+    - _Alternative_: Split documents into lines with `data.split("\n")` and parse common statements with `partition()` / slicing, falling back to the offset parser for complex or multiline constructs.
+    - _Alternative_: Cache validated bare keys in a per-call dict so repeated keys are validated with an O(1) `in` check instead of repeated `isalnum()` / `lstrip()` calls.
 
 3.  **List Comprehensions**:
 
@@ -59,14 +59,8 @@ Operators are built-in to the Starlark interpreter and avoid the overhead of met
     - `struct()` is lightweight.
     - Providers (`provider()`) are typed and better for rule interfaces but strictly immutable once created.
 
-## Regex Considerations (bazel-regex)
-
-- **Thompson NFA**: Our `bazel-regex` library guarantees linear-time matching O(N), avoiding ReDoS.
-- **Cost**: Being pure Starlark, it has overhead per character step.
-- **Strategy**: Use regex for complex token patterns (dates, float literals) but use native string ops for structural boundaries (newlines, brackets, commas).
-
 ## TOML Specifics
 
-- TOML is line-oriented roughly, but nested structures (inline tables, arrays) cross lines.
-- **Tokenization**: Split by simple delimiters first, then refine.
+- TOML is line-oriented at the statement level, while multiline strings, arrays, and inline tables can cross lines.
+- **Line-oriented fast path**: For pre-validated ASCII documents, a single `data.split("\n")` plus `partition(" = ")` avoids per-token `find()` and function-call overhead, syncing byte offsets lazily via `len("\n".join(lines[a:b])) + 1` only when falling back to the general offset parser.
 - **Lookahead**: Since we can't easily peek/backtrack efficiently, prefer a predictive parser or a robust tokenizer.

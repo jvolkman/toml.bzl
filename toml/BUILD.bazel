@@ -8,6 +8,7 @@ bzl_library(
     name = "toml",
     srcs = ["toml.bzl"],
     deps = [
+        "//toml/private:datetime",
         "//toml/private:decode",
         "//toml/private:encode",
     ],

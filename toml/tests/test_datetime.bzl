@@ -99,6 +99,27 @@ def _test_datetime_to_string(env):
     lt_micros = toml.LocalTime(7, 32, 0, 100)
     env.expect.that_str(toml.datetime_to_string(lt_micros)).equals("07:32:00.0001")
 
+def _test_decoder_validation_edge_cases(env):
+    # Trailing digits after timezone offset must be rejected.
+    env.expect.that_str(
+        toml.decode("dt = 1979-05-27T07:32:00+01:000", default = "fail"),
+    ).equals("fail")
+
+    # Bare newline inside a single-line basic string must still fail when the document has non-ASCII UTF-8.
+    env.expect.that_str(
+        toml.decode('u = "ok \303\251"\nbad = "line1\nline2"', default = "fail"),
+    ).equals("fail")
+
+    # Bare newline inside a single-line literal string must still fail when the document has non-ASCII UTF-8.
+    env.expect.that_str(
+        toml.decode("u = 'ok \303\251'\nbad = 'line1\nline2'", default = "fail"),
+    ).equals("fail")
+
+    # Non-ASCII bytes in an unquoted bare key must be rejected.
+    env.expect.that_str(
+        toml.decode("\303\260 = 1", default = "fail"),
+    ).equals("fail")
+
 def datetime_test_suite(name):
     """Register the temporal (datetime) test suite.
 
@@ -124,4 +145,8 @@ def datetime_test_suite(name):
     unit_test(
         name = name + "_to_string",
         impl = _test_datetime_to_string,
+    )
+    unit_test(
+        name = name + "_validation_edge_cases",
+        impl = _test_decoder_validation_edge_cases,
     )
