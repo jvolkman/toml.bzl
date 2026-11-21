@@ -38,9 +38,9 @@ Time per `decode()` call on an **Apple M3 Pro MacBook Pro** (Bazel 8.5.0, warm s
 
 | Document                     | Size   | Time per parse | Throughput |
 | :--------------------------- | :----- | :------------- | :--------- |
-| **Cargo.lock**               | 735 KB | **61 ms**      | ~12 MB/s   |
-| **channel-rust-1.81.0.toml** | 824 KB | **61 ms**      | ~13 MB/s   |
-| **uv.lock** (apache/airflow) | 3.3 MB | **216 ms**     | ~15 MB/s   |
+| **Cargo.lock**               | 735 KB | **18 ms**      | ~41 MB/s   |
+| **channel-rust-1.81.0.toml** | 824 KB | **16 ms**      | ~52 MB/s   |
+| **uv.lock** (apache/airflow) | 3.3 MB | **80 ms**      | ~41 MB/s   |
 
 To reproduce, build `//toml/tests/benchmarks:benchmark_prof`,
 `//toml/tests/benchmarks:channel_rust_benchmark_prof`, or
