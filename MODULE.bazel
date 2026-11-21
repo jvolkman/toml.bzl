@@ -18,6 +18,6 @@ test_suite = use_repo_rule("//toml/tests:test_suite_repo.bzl", "test_suite")
 test_suite(
     name = "toml_test_suite",
     dev_dependency = True,
-    integrity = "sha256-YY9heYfw4o+RsDN2WLNDSQLVDa24Nf54kE6KMrqfG6U=",
-    url = "https://github.com/toml-lang/toml-test/archive/ff49d109861c1ad25af53f687f2aef19ab650600.tar.gz",
+    integrity = "sha256-/xsa1dUNllB4n/kFUrt5utpgoEC/yhzm16ioJxUYyYI=",
+    url = "https://github.com/toml-lang/toml-test/archive/96fd088448ec0f4d9f061c730ed7854399c46faf.tar.gz",
 )

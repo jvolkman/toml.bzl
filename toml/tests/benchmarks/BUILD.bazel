@@ -21,10 +21,6 @@ benchmark_test(
     name = "benchmark_test",
 )
 
-benchmark_test(
-    name = "cargo_lock_benchmark",
-)
-
 benchmark_runner(
     name = "benchmark_prof",
 )

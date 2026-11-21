@@ -6,12 +6,9 @@ load(
     _LocalDateTime = "LocalDateTime",
     _LocalTime = "LocalTime",
     _OffsetDateTime = "OffsetDateTime",
-)
-load(
-    "//toml/private:decode.bzl",
     _datetime_to_string = "datetime_to_string",
-    _decode = "decode",
 )
+load("//toml/private:decode.bzl", _decode = "decode")
 load("//toml/private:encode.bzl", _encode = "encode")
 
 toml = struct(
