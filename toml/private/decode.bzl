@@ -1402,9 +1402,10 @@ def _is_bare_key_ascii(k, bare_keys):
 def _parse_flat_inline_table(body, bare_keys, allow_nested):
     """Fast-path parser for single-line flat inline tables in safe ASCII documents.
 
-    Accepts `{ k = v, ... }` where keys are bare keys and values are unescaped basic strings,
-    plain decimal integers, booleans, or empty/single-string arrays (when `allow_nested` is True).
-    Returns the decoded dict, or None to fall back.
+    Accepts `{ k = v, ... }` where keys are bare keys (or bare dotted keys like
+    `version.ref` / `a.b.c`) and values are unescaped basic strings, plain decimal integers,
+    booleans, or empty/single-string arrays (when `allow_nested` is True). Returns the decoded
+    dict, or None to fall back.
     """
     if body and body[0] == " " and body[-1] == " ":
         body = body[1:-1]
@@ -1421,9 +1422,27 @@ def _parse_flat_inline_table(body, bare_keys, allow_nested):
         pk, peq, pv = part.partition(" = ")
         if not peq or not pv:
             return None
-        if pk not in bare_keys and not _is_bare_key_ascii(pk, bare_keys):
-            return None
-        if pk in d:
+        target = d
+        if pk in bare_keys or _is_bare_key_ascii(pk, bare_keys):
+            if pk in d:
+                return None
+        elif "." in pk:
+            segs = pk.split(".")
+            for seg in segs[:-1]:
+                if seg not in bare_keys and not _is_bare_key_ascii(seg, bare_keys):
+                    return None
+                if seg in target:
+                    target = target[seg]
+                    if type(target) != "dict":
+                        return None
+                else:
+                    new_d = {}
+                    target[seg] = new_d
+                    target = new_d
+            pk = segs[-1]
+            if (pk not in bare_keys and not _is_bare_key_ascii(pk, bare_keys)) or pk in target:
+                return None
+        else:
             return None
 
         pv0 = pv[0]
@@ -1433,21 +1452,21 @@ def _parse_flat_inline_table(body, bare_keys, allow_nested):
             inner = pv[1:-1]
             if '"' in inner:
                 return None
-            d[pk] = inner
+            target[pk] = inner
         elif pv0 >= "0" and pv0 <= "9":
             if not pv.isdigit() or (pv0 == "0" and pv != "0"):
                 return None
-            d[pk] = int(pv)
+            target[pk] = int(pv)
         elif pv == "true":
-            d[pk] = True
+            target[pk] = True
         elif pv == "false":
-            d[pk] = False
+            target[pk] = False
         elif pv0 == "[" and pv[-1] == "]" and allow_nested:
             sv = pv[1:-1]
             if not sv:
-                d[pk] = []
+                target[pk] = []
             elif sv[0] == '"' and sv[-1] == '"' and sv != '"' and '"' not in sv[1:-1]:
-                d[pk] = [sv[1:-1]]
+                target[pk] = [sv[1:-1]]
             else:
                 return None
         else:
