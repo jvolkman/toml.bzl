@@ -120,6 +120,17 @@ def _test_decoder_validation_edge_cases(env):
         toml.decode("\303\260 = 1", default = "fail"),
     ).equals("fail")
 
+    # Multi-segment bare dotted keys inside flat inline tables (and conflicts).
+    dotted = toml.decode('lib = { a.b.c = "x", a.b.d = 1 }')
+    env.expect.that_str(dotted["lib"]["a"]["b"]["c"]).equals("x")
+    env.expect.that_int(dotted["lib"]["a"]["b"]["d"]).equals(1)
+    env.expect.that_str(
+        toml.decode("lib = { a.b = 1, a.b.c = 2 }", default = "fail"),
+    ).equals("fail")
+    env.expect.that_str(
+        toml.decode("lib = { a.b.c = 1, a.b = 2 }", default = "fail"),
+    ).equals("fail")
+
 def datetime_test_suite(name):
     """Register the temporal (datetime) test suite.
 
